@@ -297,6 +297,7 @@ TOKENIZER_MAPPING_NAMES = OrderedDict[str, str | None](
         ("speecht5", "SpeechT5Tokenizer" if is_sentencepiece_available() else None),
         ("splinter", "SplinterTokenizer"),
         ("squeezebert", "BertTokenizer" if is_tokenizers_available() else None),
+        ("srna", "SrnaTokenizer" if is_tokenizers_available() else None),
         ("stablelm", "GPTNeoXTokenizer" if is_tokenizers_available() else None),
         ("starcoder2", "GPT2Tokenizer" if is_tokenizers_available() else None),
         ("switch_transformers", "T5Tokenizer" if is_tokenizers_available() else None),

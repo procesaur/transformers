@@ -13,27 +13,17 @@
 # limitations under the License.
 """Tokenization classes for Serbian and Serbo-Croatian models."""
 
-from tokenizers import decoders, normalizers
-#from ...utils import logging
-from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+from tokenizers import Regex, Tokenizer, decoders, normalizers, pre_tokenizers
+from tokenizers.models import BPE
+
+from ...tokenization_utils_tokenizers import TokenizersBackend
+from ...utils import logging
 
 import regex
 
-#logger = logging.get_logger(__name__)
+logger = logging.get_logger(__name__)
 
-PRETOKENIZE_REGEX = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
-CYRILLIC_REGEX = r"\s?\p{Cyrillic}[^\p{Latin}]*"
-CLEANUP_FIND = r"(\s+)</cyr>"
-CLEANUP_REPLACE = r"</cyr>\1"
-CAPITAL_REGEX = r"\s?\b\p{Lu}\p{Ll}+\b"
-UPPER_REGEX = r"\s?\b\p{Lu}{2,}\b"
-cyr_open = "<cyr>"
-cyr_close = "</cyr>"
-cap_tag = "<cap>"
-up_tag = "<up>"
-UP_FIND = r"<up>(\s?\w+)"
-CAP_FIND = r"<cap>(\s?\w+)"
-CYR_FIND = r"<cyr>(.*?)</cyr>"
+
 
 mapping = {
         "Љ": "Lj", "љ": "lj", "Њ": "Nj", "њ": "nj", "Џ": "Dž", "џ": "dž",
@@ -56,84 +46,152 @@ def lat2cyr(text: str) -> str:
     return "".join({v: k for k, v in mapping.items()}.get(ch, ch) for ch in text)
 
 
-def SrnaNormalize(text):
-    def mark_cap(match):
-            return f"{cap_tag}{match.group(0).lower()}"
+class SrnaTokenizer(TokenizersBackend):
+    model_input_names = ["input_ids", "attention_mask"]
+    model = BPE
 
-    def mark_up(match):
-            return f"{up_tag}{match.group(0).lower()}"
+    def __init__(
+        self,
+        vocab: str | dict[str, int] | None = None,
+        merges: str | list[str] | None = None,
+        vocab_file=None,
+        merges_file=None,
+        unk_token: str = "<|endoftext|>",
+        bos_token=None,
+        eos_token: str = "<|endoftext|>",
+        pad_token: str = "<|endoftext|>",
+        add_prefix_space=None,
+        boc_token = "<|cyr_start|>",
+        eoc_token = "<|cyr_end|>",
+        cap_token = "<|cap|>",
+        up_token = "<|up|>",
+        **kwargs,
+    ):
+        self.add_prefix_space = add_prefix_space if add_prefix_space is not None else False
+        self._vocab = (
+            vocab
+            if vocab is not None
+            else {
+                "<|endoftext|>": 0,
+            }
+        )
 
-    def wrap_and_transliterate(match):
+        self.boc_token = boc_token
+        self.eoc_token = eoc_token
+        self.cap_token = cap_token
+        self.up_token = up_token
+
+
+        self.PRETOKENIZE_REGEX = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
+        self.CYRILLIC_REGEX = r"\s?\p{Cyrillic}[^\p{Latin}]*"
+        self.CLEANUP_FIND = rf"(\s+){regex.escape(self.eoc_token)}"
+        self.CLEANUP_REPLACE = rf"{regex.escape(self.eoc_token)}\1"
+        self.CAPITAL_REGEX = r"\s?\b\p{Lu}\p{Ll}+\b"
+        self.UPPER_REGEX = r"\s?\b\p{Lu}{2,}\b"
+        self.UP_FIND = rf"{regex.escape(self.up_token)}(\s?\w+)"
+        self.CAP_FIND = rf"{regex.escape(self.cap_token)}(\s?\w+)"
+        self.CYR_FIND = rf"{regex.escape(self.boc_token)}(.*?){regex.escape(self.eoc_token)}"
+
+        self._merges = merges or []
+        self._tokenizer = Tokenizer(
+            BPE(
+                vocab=self._vocab,
+                merges=self._merges,
+                dropout=None,
+                unk_token=None,
+                continuing_subword_prefix="",
+                end_of_word_suffix="",
+                fuse_unk=False,
+                byte_fallback=False,
+            )
+        )
+        self._tokenizer.decoder = decoders.ByteLevel()
+        self._tokenizer.normalizer = normalizers.NFC()
+        self._tokenizer.pre_tokenizer = pre_tokenizers.Sequence(
+            [
+                pre_tokenizers.Split(
+                    Regex(self.PRETOKENIZE_REGEX),
+                    behavior="isolated",
+                    invert=False,
+                ),
+                pre_tokenizers.ByteLevel(
+                    add_prefix_space=self.add_prefix_space,
+                    use_regex=False,
+                ),
+            ]
+        )
+
+        super().__init__(
+            vocab_file=vocab_file,
+            merges_file=merges_file,
+            unk_token=unk_token,
+            bos_token=bos_token,
+            eos_token=eos_token,
+            pad_token=pad_token,
+            add_prefix_space=add_prefix_space,
+            **kwargs,
+        )
+    
+    def prepare_for_tokenization(self, text: str, is_split_into_words=False, **kwargs):
+        def mark_cap(match):
+            return f"{self.cap_token}{match.group(0).lower()}"
+
+        def mark_up(match):
+             return f"{self.up_token}{match.group(0).lower()}"
+
+        def wrap_and_transliterate(match):
             cyr_text = match.group(0)
             latin_text = cyr2lat(cyr_text)
-            return f"{cyr_open}{latin_text}{cyr_close}"
+            return f"{self.boc_token}{latin_text}{self.eoc_token}"
 
-    text = regex.sub(CYRILLIC_REGEX, wrap_and_transliterate, text)
-    text = regex.sub(CLEANUP_FIND, CLEANUP_REPLACE, text)
-    text = regex.sub(CAPITAL_REGEX, mark_cap, text)
-    return regex.sub(UPPER_REGEX, mark_up, text)
+        text = regex.sub(self.CYRILLIC_REGEX, wrap_and_transliterate, text)
+        text = regex.sub(self.CLEANUP_FIND, self.CLEANUP_REPLACE, text)
+        text = regex.sub(self.CAPITAL_REGEX, mark_cap, text)
+        text = regex.sub(self.UPPER_REGEX, mark_up, text)
+        return text
 
-
-def SrnaDecode(text):
-    # Decode <cyr>...</cyr>
-    def decode_cyr(match):
-        return lat2cyr(match.group(1))
-
-    # Decode <cap>word
-    def decode_cap(match):
-        inner = match.group(1)
-        # Preserve leading/trailing whitespace
-        leading = len(inner) - len(inner.lstrip())
-        trailing = len(inner) - len(inner.rstrip())
-
-        core = inner.strip()
-        if core:
-            core = core[0].upper() + core[1:]  # manual capitalize
-        # Reattach whitespace
-        return (" " * leading) + core + (" " * trailing)
-
-    # Decode <allcaps>word
-    def decode_allcaps(match):
-        inner = match.group(1)
-        return inner.upper()
-
-    text = regex.sub(UP_FIND, decode_allcaps, text)
-    text = regex.sub(CAP_FIND, decode_cap, text)
-    text = regex.sub(CYR_FIND, decode_cyr, text)
-    return text
-
-
-class SrnaTokenizer(Qwen2Tokenizer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-    
     def encode(self, text: str, *args, **kwargs):
-        # Step 1: run the built-in normalizer
-        text = super().normalize(text) if hasattr(super(), "normalize") else text        # Step 2: run your custom normalization
-        normalized = SrnaNormalize(text)
-        # Step 3: pass to the parent encode
-        return super().encode(normalized, *args, **kwargs)
+        text = self.prepare_for_tokenization(text)
+        return super().encode(text, *args, **kwargs)
+
+    def _encode_plus(self, text, *args, **kwargs):
+        if self.add_prefix_space:
+            text = text.lstrip("\n\t")
+            if not text.startswith(" "):
+                text = " " + text
+        # apply your preprocessing hook
+        text = self.prepare_for_tokenization(text, **kwargs)
+        return super()._encode_plus(text, *args, **kwargs)
+
 
     def decode(self, token_ids, *args, **kwargs):
         text = super().decode(token_ids, *args, **kwargs)
         # then your custom tag decoding
-        return SrnaDecode(text)
+
+        def decode_cyr(match):
+            return lat2cyr(match.group(1))
+
+        # Decode <cap>word
+        def decode_cap(match):
+            inner = match.group(1)
+            leading_ws = regex.match(r"^\s*", inner).group(0)
+            if not leading_ws:
+                return inner[0].upper() + inner[1:]
+
+            core = inner.lstrip()
+            if core:
+                core = core[0].upper() + core[1:]
+            return leading_ws + core
+
+        def decode_allcaps(match):
+            inner = match.group(1)
+            return inner.upper()
+   
+
+        text = regex.sub(self.UP_FIND, decode_allcaps, text)
+        text = regex.sub(self.CAP_FIND, decode_cap, text)
+        text = regex.sub(self.CYR_FIND, decode_cyr, text)
+        return text
+
 
 __all__ = ["SrnaTokenizer"]
-
-
-
-tok = SrnaTokenizer.from_pretrained("Qwen/Qwen3.5-0.8B")
-
-original = "1. Hej, жабо, Поздрављам те, dobri svete, iz године 2029-те. Hadži-Jordan. POZZ!"
-expected = "1.<cap> hej,<cyr> žabo,<cap> pozdravljam te,</cyr> dobri svete, iz<cyr> godine 2029-te.</cyr><cap> hadži-<cap>jordan.<up> pozz!"
-
-# Example encoded text
-encoded = "<cyr>Pozdrav</cyr> iz <cap>beograda <allcaps>srbijа"
-
-# Use your custom decoder
-ids = tok.encode(original)
-print(ids)
-
-decoded = tok.decode(ids)
-print(decoded)
